@@ -1,0 +1,6 @@
+{
+  "name": "QuantCore: FX & Multi-Asset Backtesting & Broker Simulation Platform",
+  "description": "Comprehensive quantitative trading platform featuring GKFX-style broker simulation with dynamic spread & margin modeling, Optuna-based walk-forward strategy optimization, and cross-platform mobile architecture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
