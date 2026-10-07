@@ -497,6 +497,26 @@ export const BacktestLab: React.FC<BacktestLabProps> = ({ onApplyStrategyToTermi
           {/* Results Analysis */}
           {wfoResult ? (
             <div className="space-y-4">
+              {/* Zero-trade explanation */}
+              {wfoResult.aggregatedISMetrics.totalTrades + wfoResult.aggregatedOOSMetrics.totalTrades === 0 && (
+                <div className="p-4 rounded-xl border bg-amber-950/20 border-amber-800/60 space-y-2">
+                  <div className="text-xs uppercase tracking-wider font-bold text-amber-400">
+                    No trades generated
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    The strategy produced zero trades on this dataset, so the metrics below are not meaningful.
+                    Entries need a trend-aligned moving-average setup, an RSI pullback recovery or momentum
+                    expansion, a bar closing in the trade direction, and every selected confluence filter
+                    (MACD, Bollinger Bands, Support/Resistance) to agree on the same bar.
+                  </p>
+                  <ul className="text-[11px] text-slate-400 list-disc pl-4 space-y-0.5">
+                    <li>Try deselecting a confluence filter (MACD, Bollinger Bands, Support/Resistance).</li>
+                    <li>Widen the RSI thresholds, or shorten the EMA slow period to trigger more trend flips.</li>
+                    <li>Try a different symbol or timeframe, or re-run for a new price sample.</li>
+                  </ul>
+                </div>
+              )}
+
               {/* Walk-Forward Efficiency (WFE) & Overfitting Card */}
               <div className={`p-4 rounded-xl border ${
                 wfoResult.overallWFE >= 60
