@@ -20,6 +20,7 @@ import {
   calculateEMA,
   calculateMACD,
   calculateRSI,
+  calculateSMA,
   calculateSupportResistance,
   isIndicatorAllowed,
 } from './indicators';
@@ -47,39 +48,59 @@ export const DEFAULT_SEARCH_SPACE: OptimizationParamBounds = {
   srLookback: { min: 10, max: 30, step: 5 },
 };
 
+/** Fraction of the dataset used as each fold's In-Sample window. */
+const WFO_IS_RATIO = 0.6;
+
 export class OptunaWalkForwardEngine {
   /**
-   * Partition dataset into N rolling walk-forward windows (folds)
-   * Each fold has In-Sample (IS) for parameter tuning and Out-of-Sample (OOS) for validation
+   * Partition dataset into N rolling walk-forward windows (folds).
+   *
+   * - Every In-Sample (IS) window spans `isRatio` of the whole dataset (default 60%,
+   *   ~240 bars of a 400-bar series), so a meaningful training sample remains after
+   *   indicator warm-up.
+   * - The remaining (1 - isRatio) of the dataset is split into `numFolds` equal
+   *   Out-of-Sample (OOS) chunks that tile it contiguously up to `totalCandles`,
+   *   leaving no gaps. The last chunk absorbs any rounding remainder.
+   * - Fold k trains on the `isSpan` bars immediately preceding its OOS chunk (rolling).
+   *
+   * Index ranges are half-open: [start, end), matching Array.prototype.slice.
+   * Pass `candles` to get formatted start/end timestamps on each window.
    */
   public static generateWalkForwardWindows(
     totalCandles: number,
     numFolds: number = 4,
-    isRatio: number = 0.7
+    isRatio: number = 0.6,
+    candles?: Candle[]
   ): WalkForwardWindow[] {
     const windows: WalkForwardWindow[] = [];
-    const foldSpan = Math.floor(totalCandles / (numFolds + 0.5));
-    const isSpan = Math.floor(foldSpan * isRatio);
-    const oosSpan = foldSpan - isSpan;
+    if (totalCandles <= 0 || numFolds <= 0) return windows;
+
+    const isSpan = Math.floor(totalCandles * isRatio);
+    const oosTotal = totalCandles - isSpan;
+    const oosChunk = Math.floor(oosTotal / numFolds);
+    if (isSpan <= 0 || oosChunk <= 0) return windows;
+
+    const fmt = (index: number): string => {
+      const ts = candles?.[Math.min(Math.max(index, 0), (candles?.length ?? 1) - 1)]?.timestamp;
+      return ts === undefined ? '' : new Date(ts).toISOString().slice(0, 16).replace('T', ' ');
+    };
 
     for (let fold = 0; fold < numFolds; fold++) {
-      const isStartIndex = Math.floor(fold * (oosSpan * 0.9));
-      const isEndIndex = isStartIndex + isSpan;
-      const oosStartIndex = isEndIndex;
-      const oosEndIndex = Math.min(totalCandles - 1, oosStartIndex + oosSpan);
-
-      if (oosEndIndex <= oosStartIndex) break;
+      const oosStartIndex = isSpan + fold * oosChunk;
+      const oosEndIndex = fold === numFolds - 1 ? totalCandles : oosStartIndex + oosChunk;
+      const isEndIndex = oosStartIndex;
+      const isStartIndex = isEndIndex - isSpan;
 
       windows.push({
         foldId: fold + 1,
         isStartIndex,
         isEndIndex,
-        isStartDate: `Fold ${fold + 1} IS (${isStartIndex}-${isEndIndex})`,
-        isEndDate: ``,
+        isStartDate: fmt(isStartIndex),
+        isEndDate: fmt(isEndIndex - 1),
         oosStartIndex,
         oosEndIndex,
-        oosStartDate: `Fold ${fold + 1} OOS (${oosStartIndex}-${oosEndIndex})`,
-        oosEndDate: ``,
+        oosStartDate: fmt(oosStartIndex),
+        oosEndDate: fmt(oosEndIndex - 1),
       });
     }
 
@@ -196,23 +217,66 @@ export class OptunaWalkForwardEngine {
   }
 
   /**
-   * Fast Backtest Runner on a slice of candles
+   * Number of leading bars the active indicators need before signals are meaningful.
+   */
+  public static getWarmupBars(strategy: StrategyConfig): number {
+    return Math.max(
+      strategy.emaSlowPeriod,
+      strategy.rsiPeriod + 1,
+      strategy.bbPeriod,
+      strategy.atrPeriod,
+      strategy.macdSlow + strategy.macdSignal,
+      30
+    );
+  }
+
+  /**
+   * Fast Backtest Runner on a slice of candles.
+   *
+   * Entry thesis: trend-following with momentum pullback & expansion.
+   *  - Macro direction: when EMA/SMA is selected, trade only with the fast/slow MA trend.
+   *  - Micro timing (RSI, when selected), long side (short side is mirrored):
+   *      * Pullback recovery: prevRsi <= 50, RSI rising and >= rsiOversold.
+   *      * Momentum continuation: 50 <= RSI <= rsiOverbought and RSI rising.
+   *  - Confluence (each applies only when its indicator is selected): MACD histogram
+   *    direction, Bollinger envelope room, S/R room (no barrier within 1 ATR ahead).
+   *  - The entry bar must close in the trade direction.
+   *
+   * `evalStartIndex` lets callers pass extra leading candles purely as indicator
+   * history (e.g. for an out-of-sample slice); no trades open before that index.
    */
   public static runBacktest(
     candles: Candle[],
     strategy: StrategyConfig,
-    initialBalance: number = 10000
+    initialBalance: number = 10000,
+    evalStartIndex: number = 0
   ): { metrics: BacktestPerformanceMetrics; equityCurve: { timestamp: number; equity: number }[] } {
     const spec = ASSET_SPECS[strategy.symbol] || ASSET_SPECS['EUR/USD'];
 
     // 1. Calculate Restricted Indicators
-    const emaFast = calculateEMA(candles, strategy.emaFastPeriod);
-    const emaSlow = calculateEMA(candles, strategy.emaSlowPeriod);
+    const selected = new Set(strategy.selectedIndicators);
+    const useEma = selected.has('EMA');
+    const useSma = selected.has('SMA');
+    const useTrend = useEma || useSma;
+    const useRsi = selected.has('RSI');
+    const useMacd = selected.has('MACD');
+    const useBb = selected.has('BOLLINGER_BANDS');
+    const useSr = selected.has('SUPPORT_RESISTANCE');
+
+    const maFastLine = useEma
+      ? calculateEMA(candles, strategy.emaFastPeriod)
+      : useSma
+      ? calculateSMA(candles, strategy.emaFastPeriod)
+      : [];
+    const maSlowLine = useEma
+      ? calculateEMA(candles, strategy.emaSlowPeriod)
+      : useSma
+      ? calculateSMA(candles, strategy.emaSlowPeriod)
+      : [];
     const rsi = calculateRSI(candles, strategy.rsiPeriod);
     const macd = calculateMACD(candles, strategy.macdFast, strategy.macdSlow, strategy.macdSignal);
     const bb = calculateBollingerBands(candles, strategy.bbPeriod, strategy.bbStdDev);
     const atr = calculateATR(candles, strategy.atrPeriod);
-    const sr = calculateSupportResistance(candles, strategy.srLookback);
 
     let balance = initialBalance;
     let equity = initialBalance;
@@ -237,13 +301,7 @@ export class OptunaWalkForwardEngine {
     let maxDrawdownUSD = 0;
     let maxDrawdownPercent = 0;
 
-    const startIndex = Math.max(
-      strategy.emaSlowPeriod,
-      strategy.rsiPeriod,
-      strategy.bbPeriod,
-      strategy.atrPeriod,
-      30
-    );
+    const startIndex = Math.max(this.getWarmupBars(strategy), evalStartIndex);
 
     for (let i = startIndex; i < candles.length; i++) {
       const c = candles[i];
@@ -303,26 +361,72 @@ export class OptunaWalkForwardEngine {
         let buySignal = false;
         let sellSignal = false;
 
-        const currentEmaFast = emaFast[i];
-        const currentEmaSlow = emaSlow[i];
         const currentRsi = rsi[i];
+        const prevRsi = rsi[i - 1];
         const currentAtr = atr[i] || spec.pipMultiplier * 15;
 
-        // Condition 1: Trend Alignment via EMAs
-        const isBullTrend = !isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast > currentEmaSlow;
-        const isBearTrend = !isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast < currentEmaSlow;
+        // Macro trend direction (only enforced when a moving average is selected)
+        const fastMA = maFastLine[i];
+        const slowMA = maSlowLine[i];
+        const maValid = useTrend && !isNaN(fastMA) && !isNaN(slowMA);
+        const isBullTrend = !useTrend || (maValid && fastMA > slowMA);
+        const isBearTrend = !useTrend || (maValid && fastMA < slowMA);
 
-        // Condition 2: Momentum confirmation via RSI bounce
-        const rsiOversoldCross = !isNaN(currentRsi) && currentRsi < strategy.rsiOversold;
-        const rsiOverboughtCross = !isNaN(currentRsi) && currentRsi > strategy.rsiOverbought;
+        // Micro entry timing via RSI (only enforced when RSI is selected)
+        let rsiLong = true;
+        let rsiShort = true;
+        if (useRsi) {
+          const rsiValid = !isNaN(currentRsi) && !isNaN(prevRsi);
+          const rsiRising = rsiValid && currentRsi > prevRsi;
+          const rsiFalling = rsiValid && currentRsi < prevRsi;
+          rsiLong =
+            rsiValid &&
+            rsiRising &&
+            ((prevRsi <= 50 && currentRsi >= strategy.rsiOversold) || // pullback recovery
+              (currentRsi >= 50 && currentRsi <= strategy.rsiOverbought)); // momentum continuation
+          rsiShort =
+            rsiValid &&
+            rsiFalling &&
+            ((prevRsi >= 50 && currentRsi <= strategy.rsiOverbought) ||
+              (currentRsi <= 50 && currentRsi >= strategy.rsiOversold));
+        }
 
-        // Condition 3: Support / Resistance confluence
-        const nearSupport = sr.nearestSupport ? Math.abs(c.close - sr.nearestSupport) < currentAtr : true;
-        const nearResistance = sr.nearestResistance ? Math.abs(c.close - sr.nearestResistance) < currentAtr : true;
+        // Confluence filters
+        let macdLong = true;
+        let macdShort = true;
+        if (useMacd) {
+          const h = macd.histogram[i];
+          const hPrev = macd.histogram[i - 1];
+          const hValid = !isNaN(h) && !isNaN(hPrev);
+          macdLong = hValid && h > hPrev;
+          macdShort = hValid && h < hPrev;
+        }
 
-        if (isBullTrend && rsiOversoldCross && nearSupport) {
+        let bbLong = true;
+        let bbShort = true;
+        if (useBb) {
+          const upper = bb.upper[i];
+          const lower = bb.lower[i];
+          const bbValid = !isNaN(upper) && !isNaN(lower);
+          bbLong = bbValid && c.close < upper; // room to expand, not already stretched
+          bbShort = bbValid && c.close > lower;
+        }
+
+        let srLong = true;
+        let srShort = true;
+        if (useSr) {
+          // Causal S/R: only candles up to and including bar i
+          const sr = calculateSupportResistance(candles.slice(0, i + 1), strategy.srLookback);
+          srLong = !(sr.nearestResistance !== null && sr.nearestResistance - c.close < currentAtr);
+          srShort = !(sr.nearestSupport !== null && c.close - sr.nearestSupport < currentAtr);
+        }
+
+        const barUp = c.close > c.open;
+        const barDown = c.close < c.open;
+
+        if (isBullTrend && rsiLong && macdLong && bbLong && srLong && barUp) {
           buySignal = true;
-        } else if (isBearTrend && rsiOverboughtCross && nearResistance) {
+        } else if (isBearTrend && rsiShort && macdShort && bbShort && srShort && barDown) {
           sellSignal = true;
         }
 
@@ -427,7 +531,7 @@ export class OptunaWalkForwardEngine {
     onProgress?: (completedTrials: number, totalTrials: number) => void
   ): WalkForwardResult {
     const startTime = Date.now();
-    const windows = this.generateWalkForwardWindows(candles.length, numFolds, 0.7);
+    const windows = this.generateWalkForwardWindows(candles.length, numFolds, WFO_IS_RATIO, candles);
     const totalExpectedTrials = windows.length * trialsPerFold;
     const trials: OptunaTrial[] = [];
 
@@ -435,7 +539,11 @@ export class OptunaWalkForwardEngine {
 
     for (const window of windows) {
       const isCandles = candles.slice(window.isStartIndex, window.isEndIndex);
-      const oosCandles = candles.slice(window.oosStartIndex, window.oosEndIndex);
+      // OOS slices are short, so prepend indicator history; trades only open inside the OOS range.
+      const warmup = this.getWarmupBars(baseStrategy);
+      const oosSliceStart = Math.max(0, window.oosStartIndex - warmup);
+      const oosCandles = candles.slice(oosSliceStart, window.oosEndIndex);
+      const oosEvalStart = window.oosStartIndex - oosSliceStart;
 
       const foldTrialHistory: OptunaTrial[] = [];
 
@@ -452,7 +560,7 @@ export class OptunaWalkForwardEngine {
         const isResult = this.runBacktest(isCandles, trialStrategy);
 
         // Out-of-sample backtest
-        const oosResult = this.runBacktest(oosCandles, trialStrategy);
+        const oosResult = this.runBacktest(oosCandles, trialStrategy, 10000, oosEvalStart);
 
         // Walk-Forward Efficiency calculation:
         // WFE = (OOS Return % / IS Return %)
@@ -494,11 +602,12 @@ export class OptunaWalkForwardEngine {
     const finalStrategy: StrategyConfig = { ...baseStrategy, ...bestParams };
 
     // Run aggregate evaluation across all IS and OOS portions
-    const allIsCandles = candles.slice(0, Math.floor(candles.length * 0.7));
-    const allOosCandles = candles.slice(Math.floor(candles.length * 0.7));
+    const splitIndex = Math.floor(candles.length * WFO_IS_RATIO);
+    const allIsCandles = candles.slice(0, splitIndex);
+    const finalWarmup = Math.min(splitIndex, this.getWarmupBars(finalStrategy));
 
     const finalIS = this.runBacktest(allIsCandles, finalStrategy);
-    const finalOOS = this.runBacktest(allOosCandles, finalStrategy);
+    const finalOOS = this.runBacktest(candles.slice(splitIndex - finalWarmup), finalStrategy, 10000, finalWarmup);
 
     const isRet = Math.max(0.1, Math.abs(finalIS.metrics.returnPercent));
     const oosRet = finalOOS.metrics.returnPercent;
