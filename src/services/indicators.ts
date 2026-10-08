@@ -317,6 +317,27 @@ export interface SupportResistanceLevels {
   nearestResistance: number | null;
 }
 
+export function calculateRollingSupportResistance(
+  candles: Candle[],
+  lookback: number = 15
+): { support: number[]; resistance: number[] } {
+  const support: number[] = new Array(candles.length).fill(NaN);
+  const resistance: number[] = new Array(candles.length).fill(NaN);
+
+  for (let i = lookback; i < candles.length; i++) {
+    let minLow = Infinity;
+    let maxHigh = -Infinity;
+    for (let j = Math.max(0, i - lookback); j < i; j++) {
+      if (candles[j].low < minLow) minLow = candles[j].low;
+      if (candles[j].high > maxHigh) maxHigh = candles[j].high;
+    }
+    support[i] = minLow;
+    resistance[i] = maxHigh;
+  }
+
+  return { support, resistance };
+}
+
 export function calculateSupportResistance(
   candles: Candle[],
   lookback: number = 15

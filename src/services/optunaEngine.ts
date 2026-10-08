@@ -19,7 +19,9 @@ import {
   calculateBollingerBands,
   calculateEMA,
   calculateMACD,
+  calculateRollingSupportResistance,
   calculateRSI,
+  calculateSMA,
   calculateSupportResistance,
   isIndicatorAllowed,
 } from './indicators';
@@ -55,31 +57,43 @@ export class OptunaWalkForwardEngine {
   public static generateWalkForwardWindows(
     totalCandles: number,
     numFolds: number = 4,
-    isRatio: number = 0.7
+    candles?: Candle[]
   ): WalkForwardWindow[] {
     const windows: WalkForwardWindow[] = [];
-    const foldSpan = Math.floor(totalCandles / (numFolds + 0.5));
-    const isSpan = Math.floor(foldSpan * isRatio);
-    const oosSpan = foldSpan - isSpan;
+    if (totalCandles < 120 || numFolds < 1) return windows;
+
+    // Allocate 40% of the dataset to rolling Out-of-Sample (OOS) evaluation across folds.
+    // The remaining 60% provides an In-Sample training window (>200 bars) that comfortably
+    // leaves a meaningful sample (>150 bars) after indicator warm-up periods (up to 70 bars).
+    // The OOS windows seamlessly tile all the way to totalCandles, ensuring the entire dataset is covered.
+    const oosTotalSpan = Math.floor(totalCandles * 0.4);
+    const oosSpan = Math.max(20, Math.floor(oosTotalSpan / numFolds));
+    const isSpan = totalCandles - numFolds * oosSpan;
 
     for (let fold = 0; fold < numFolds; fold++) {
-      const isStartIndex = Math.floor(fold * (oosSpan * 0.9));
-      const isEndIndex = isStartIndex + isSpan;
-      const oosStartIndex = isEndIndex;
-      const oosEndIndex = Math.min(totalCandles - 1, oosStartIndex + oosSpan);
+      const isStartIndex = fold * oosSpan;
+      const oosStartIndex = isSpan + fold * oosSpan;
+      const isEndIndex = oosStartIndex;
+      const oosEndIndex = fold === numFolds - 1 ? totalCandles : oosStartIndex + oosSpan;
 
-      if (oosEndIndex <= oosStartIndex) break;
+      if (isEndIndex <= isStartIndex || oosEndIndex <= oosStartIndex) break;
+
+      const formatDate = (idx: number) => {
+        if (!candles || !candles[idx]) return `Bar ${idx}`;
+        const d = new Date(candles[idx].timestamp);
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      };
 
       windows.push({
         foldId: fold + 1,
         isStartIndex,
         isEndIndex,
-        isStartDate: `Fold ${fold + 1} IS (${isStartIndex}-${isEndIndex})`,
-        isEndDate: ``,
+        isStartDate: formatDate(isStartIndex),
+        isEndDate: formatDate(isEndIndex - 1),
         oosStartIndex,
         oosEndIndex,
-        oosStartDate: `Fold ${fold + 1} OOS (${oosStartIndex}-${oosEndIndex})`,
-        oosEndDate: ``,
+        oosStartDate: formatDate(oosStartIndex),
+        oosEndDate: formatDate(oosEndIndex - 1),
       });
     }
 
@@ -201,18 +215,21 @@ export class OptunaWalkForwardEngine {
   public static runBacktest(
     candles: Candle[],
     strategy: StrategyConfig,
-    initialBalance: number = 10000
+    initialBalance: number = 10000,
+    evalStartIndex?: number,
+    evalEndIndex?: number
   ): { metrics: BacktestPerformanceMetrics; equityCurve: { timestamp: number; equity: number }[] } {
     const spec = ASSET_SPECS[strategy.symbol] || ASSET_SPECS['EUR/USD'];
 
-    // 1. Calculate Restricted Indicators
+    // 1. Calculate Restricted Indicators across the candle series
     const emaFast = calculateEMA(candles, strategy.emaFastPeriod);
     const emaSlow = calculateEMA(candles, strategy.emaSlowPeriod);
+    const sma = calculateSMA(candles, strategy.emaSlowPeriod);
     const rsi = calculateRSI(candles, strategy.rsiPeriod);
     const macd = calculateMACD(candles, strategy.macdFast, strategy.macdSlow, strategy.macdSignal);
     const bb = calculateBollingerBands(candles, strategy.bbPeriod, strategy.bbStdDev);
     const atr = calculateATR(candles, strategy.atrPeriod);
-    const sr = calculateSupportResistance(candles, strategy.srLookback);
+    const sr = calculateRollingSupportResistance(candles, strategy.srLookback);
 
     let balance = initialBalance;
     let equity = initialBalance;
@@ -237,23 +254,69 @@ export class OptunaWalkForwardEngine {
     let maxDrawdownUSD = 0;
     let maxDrawdownPercent = 0;
 
-    const startIndex = Math.max(
-      strategy.emaSlowPeriod,
-      strategy.rsiPeriod,
-      strategy.bbPeriod,
-      strategy.atrPeriod,
-      30
+    const selected = strategy.selectedIndicators;
+    const hasEma = selected.includes('EMA');
+    const hasSma = selected.includes('SMA');
+    const hasRsi = selected.includes('RSI');
+    const hasMacd = selected.includes('MACD');
+    const hasBb = selected.includes('BOLLINGER_BANDS');
+    const hasAtr = selected.includes('ATR');
+    const hasSr = selected.includes('SUPPORT_RESISTANCE');
+
+    // Dynamic warm-up based on active indicators
+    const warmup = Math.max(
+      hasEma ? strategy.emaSlowPeriod : 0,
+      hasSma ? strategy.emaSlowPeriod : 0,
+      hasRsi ? strategy.rsiPeriod : 0,
+      hasMacd ? strategy.macdSlow + strategy.macdSignal : 0,
+      hasBb ? strategy.bbPeriod : 0,
+      hasAtr ? strategy.atrPeriod : 0,
+      hasSr ? strategy.srLookback : 0,
+      20
     );
 
-    for (let i = startIndex; i < candles.length; i++) {
+    const loopStart = Math.max(evalStartIndex ?? warmup, warmup);
+    const loopEnd = evalEndIndex ? Math.min(candles.length, evalEndIndex) : candles.length;
+
+    for (let i = loopStart; i < loopEnd; i++) {
       const c = candles[i];
       const prevC = candles[i - 1];
 
-      // 1. Check if active trade hit SL or TP
+      // 1. Process active trade: trailing stop, intraday drawdown, and SL/TP exit
       if (activeTrade) {
+        // Trailing stop adjustment
+        if (strategy.trailingStopEnabled && strategy.trailingStopPips > 0) {
+          const trailDist = strategy.trailingStopPips * spec.pipMultiplier;
+          if (activeTrade.side === 'BUY') {
+            if (c.high - activeTrade.openPrice > trailDist) {
+              const newSl = Number((c.close - trailDist).toFixed(spec.digits));
+              if (newSl > activeTrade.sl) activeTrade.sl = newSl;
+            }
+          } else {
+            if (activeTrade.openPrice - c.low > trailDist) {
+              const newSl = Number((c.close + trailDist).toFixed(spec.digits));
+              if (newSl < activeTrade.sl) activeTrade.sl = newSl;
+            }
+          }
+        }
+
+        // Intraday equity drawdown tracking using bar extremes
+        const worstPrice = activeTrade.side === 'BUY' ? c.low : c.high;
+        const worstDiff =
+          activeTrade.side === 'BUY'
+            ? worstPrice - activeTrade.openPrice
+            : activeTrade.openPrice - worstPrice;
+        const comm = spec.commissionPerLot * 2 * activeTrade.lots;
+        const intraPnL = worstDiff * activeTrade.lots * spec.contractSize - comm;
+        const intraEquity = balance + intraPnL;
+        const intraDdUSD = peakEquity - intraEquity;
+        if (intraDdUSD > maxDrawdownUSD) maxDrawdownUSD = intraDdUSD;
+        const intraDdPct = peakEquity > 0 ? (intraDdUSD / peakEquity) * 100 : 0;
+        if (intraDdPct > maxDrawdownPercent) maxDrawdownPercent = intraDdPct;
+
+        // Check SL or TP trigger
         let closed = false;
         let exitPrice = c.close;
-        let pnl = 0;
 
         if (activeTrade.side === 'BUY') {
           if (c.low <= activeTrade.sl) {
@@ -273,13 +336,19 @@ export class OptunaWalkForwardEngine {
           }
         }
 
+        // Close position at market price on the last evaluation bar to reflect true terminal state
+        if (!closed && i === loopEnd - 1) {
+          exitPrice = c.close;
+          closed = true;
+        }
+
         if (closed) {
           const diff =
             activeTrade.side === 'BUY'
               ? exitPrice - activeTrade.openPrice
               : activeTrade.openPrice - exitPrice;
           const commission = spec.commissionPerLot * 2 * activeTrade.lots;
-          pnl = diff * activeTrade.lots * spec.contractSize - commission;
+          const pnl = diff * activeTrade.lots * spec.contractSize - commission;
 
           balance += pnl;
           equity = balance;
@@ -290,7 +359,7 @@ export class OptunaWalkForwardEngine {
 
           if (equity > peakEquity) peakEquity = equity;
           const ddUSD = peakEquity - equity;
-          const ddPct = (ddUSD / peakEquity) * 100;
+          const ddPct = peakEquity > 0 ? (ddUSD / peakEquity) * 100 : 0;
           if (ddUSD > maxDrawdownUSD) maxDrawdownUSD = ddUSD;
           if (ddPct > maxDrawdownPercent) maxDrawdownPercent = ddPct;
 
@@ -298,36 +367,78 @@ export class OptunaWalkForwardEngine {
         }
       }
 
-      // 2. Strategy Entry Condition (if no active trade)
-      if (!activeTrade && i < candles.length - 1) {
+      // 2. Strategy Entry Condition (Coherent Market Thesis: Trend-Following with Momentum Pullback & Expansion)
+      if (!activeTrade && i < loopEnd - 1) {
         let buySignal = false;
         let sellSignal = false;
 
         const currentEmaFast = emaFast[i];
         const currentEmaSlow = emaSlow[i];
+        const currentSma = sma[i];
         const currentRsi = rsi[i];
+        const prevRsi = rsi[i - 1];
         const currentAtr = atr[i] || spec.pipMultiplier * 15;
 
-        // Condition 1: Trend Alignment via EMAs
-        const isBullTrend = !isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast > currentEmaSlow;
-        const isBearTrend = !isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast < currentEmaSlow;
+        // Condition 1: Macro Trend Filter (EMA / SMA)
+        // Trend is defined by active moving averages; if none selected, both directions are eligible.
+        const hasTrendFilter = hasEma || hasSma;
+        const emaBull = !hasEma || (!isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast > currentEmaSlow);
+        const emaBear = !hasEma || (!isNaN(currentEmaFast) && !isNaN(currentEmaSlow) && currentEmaFast < currentEmaSlow);
+        const smaBull = !hasSma || (!isNaN(currentSma) && c.close > currentSma);
+        const smaBear = !hasSma || (!isNaN(currentSma) && c.close < currentSma);
 
-        // Condition 2: Momentum confirmation via RSI bounce
-        const rsiOversoldCross = !isNaN(currentRsi) && currentRsi < strategy.rsiOversold;
-        const rsiOverboughtCross = !isNaN(currentRsi) && currentRsi > strategy.rsiOverbought;
+        const trendBull = !hasTrendFilter || (emaBull && smaBull);
+        const trendBear = !hasTrendFilter || (emaBear && smaBear);
 
-        // Condition 3: Support / Resistance confluence
-        const nearSupport = sr.nearestSupport ? Math.abs(c.close - sr.nearestSupport) < currentAtr : true;
-        const nearResistance = sr.nearestResistance ? Math.abs(c.close - sr.nearestResistance) < currentAtr : true;
+        // Condition 2: Coherent RSI Thesis:
+        // Avoid impossible concurrent requirements (e.g. demanding uptrend + deeply oversold RSI at the exact same bar).
+        // Instead:
+        // Bullish:
+        //   - Pullback bounce: RSI was recently dipping into pullback territory and is now turning back up (prevRsi <= 50, currentRsi > prevRsi, currentRsi >= rsiOversold)
+        //   - OR Momentum expansion: RSI is in a healthy bullish regime above 50 without being overbought (currentRsi >= 50, currentRsi <= rsiOverbought, currentRsi >= prevRsi)
+        // Bearish:
+        //   - Pullback rejection: RSI was elevated and is turning down (prevRsi >= 50, currentRsi < prevRsi, currentRsi <= rsiOverbought)
+        //   - OR Momentum expansion: RSI is in a healthy bearish regime below 50 without being oversold (currentRsi <= 50, currentRsi >= rsiOversold, currentRsi <= prevRsi)
+        const rsiBull =
+          !hasRsi ||
+          (!isNaN(currentRsi) && !isNaN(prevRsi) && (
+            (prevRsi <= 50 && currentRsi > prevRsi && currentRsi >= strategy.rsiOversold) ||
+            (currentRsi >= 50 && currentRsi <= strategy.rsiOverbought && currentRsi >= prevRsi)
+          ));
 
-        if (isBullTrend && rsiOversoldCross && nearSupport) {
-          buySignal = true;
-        } else if (isBearTrend && rsiOverboughtCross && nearResistance) {
-          sellSignal = true;
-        }
+        const rsiBear =
+          !hasRsi ||
+          (!isNaN(currentRsi) && !isNaN(prevRsi) && (
+            (prevRsi >= 50 && currentRsi < prevRsi && currentRsi <= strategy.rsiOverbought) ||
+            (currentRsi <= 50 && currentRsi >= strategy.rsiOversold && currentRsi <= prevRsi)
+          ));
+
+        // Condition 3: MACD Momentum Confluence
+        const macdBull = !hasMacd || (macd.macdLine[i] > macd.signalLine[i]);
+        const macdBear = !hasMacd || (macd.macdLine[i] < macd.signalLine[i]);
+
+        // Condition 4: Bollinger Bands Volatility Envelope
+        const bbBull = !hasBb || (c.close >= bb.middle[i] && c.close <= bb.upper[i] * 1.01);
+        const bbBear = !hasBb || (c.close <= bb.middle[i] && c.close >= bb.lower[i] * 0.99);
+
+        // Condition 5: Support / Resistance Confluence
+        const srBull = !hasSr || isNaN(sr.support[i]) || (c.close >= sr.support[i]);
+        const srBear = !hasSr || isNaN(sr.resistance[i]) || (c.close <= sr.resistance[i]);
+
+        // Condition 6: Directional Bar Confirmation
+        const priceBull = c.close >= c.open || c.close > prevC.close;
+        const priceBear = c.close <= c.open || c.close < prevC.close;
+
+        buySignal = trendBull && rsiBull && macdBull && bbBull && srBull && priceBull;
+        sellSignal = trendBear && rsiBear && macdBear && bbBear && srBear && priceBear;
 
         if (buySignal || sellSignal) {
-          const entryPrice = c.close;
+          // Model institutional spread on entry matching live terminal ECN execution
+          const halfSpread = (spec.baseSpreadPips * spec.pipMultiplier) / 2;
+          const entryPrice = buySignal
+            ? Number((c.close + halfSpread).toFixed(spec.digits))
+            : Number((c.close - halfSpread).toFixed(spec.digits));
+
           const slDistance = currentAtr * strategy.stopLossValue;
           const tpDistance = slDistance * strategy.riskRewardRatio;
 
@@ -427,7 +538,7 @@ export class OptunaWalkForwardEngine {
     onProgress?: (completedTrials: number, totalTrials: number) => void
   ): WalkForwardResult {
     const startTime = Date.now();
-    const windows = this.generateWalkForwardWindows(candles.length, numFolds, 0.7);
+    const windows = this.generateWalkForwardWindows(candles.length, numFolds, candles);
     const totalExpectedTrials = windows.length * trialsPerFold;
     const trials: OptunaTrial[] = [];
 
@@ -435,7 +546,7 @@ export class OptunaWalkForwardEngine {
 
     for (const window of windows) {
       const isCandles = candles.slice(window.isStartIndex, window.isEndIndex);
-      const oosCandles = candles.slice(window.oosStartIndex, window.oosEndIndex);
+      const oosFullCandles = candles.slice(0, window.oosEndIndex);
 
       const foldTrialHistory: OptunaTrial[] = [];
 
@@ -451,8 +562,14 @@ export class OptunaWalkForwardEngine {
         // In-sample backtest
         const isResult = this.runBacktest(isCandles, trialStrategy);
 
-        // Out-of-sample backtest
-        const oosResult = this.runBacktest(oosCandles, trialStrategy);
+        // Out-of-sample backtest with full continuous indicator warm-up evaluated strictly in OOS window
+        const oosResult = this.runBacktest(
+          oosFullCandles,
+          trialStrategy,
+          10000,
+          window.oosStartIndex,
+          window.oosEndIndex
+        );
 
         // Walk-Forward Efficiency calculation:
         // WFE = (OOS Return % / IS Return %)
@@ -494,11 +611,11 @@ export class OptunaWalkForwardEngine {
     const finalStrategy: StrategyConfig = { ...baseStrategy, ...bestParams };
 
     // Run aggregate evaluation across all IS and OOS portions
-    const allIsCandles = candles.slice(0, Math.floor(candles.length * 0.7));
-    const allOosCandles = candles.slice(Math.floor(candles.length * 0.7));
+    const splitIndex = Math.floor(candles.length * 0.6);
+    const allIsCandles = candles.slice(0, splitIndex);
 
     const finalIS = this.runBacktest(allIsCandles, finalStrategy);
-    const finalOOS = this.runBacktest(allOosCandles, finalStrategy);
+    const finalOOS = this.runBacktest(candles, finalStrategy, 10000, splitIndex, candles.length);
 
     const isRet = Math.max(0.1, Math.abs(finalIS.metrics.returnPercent));
     const oosRet = finalOOS.metrics.returnPercent;

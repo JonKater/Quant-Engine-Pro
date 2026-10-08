@@ -552,12 +552,25 @@ export const BacktestLab: React.FC<BacktestLabProps> = ({ onApplyStrategyToTermi
                 </div>
               </div>
 
+              {/* Zero Trades Notice if parameters prevented any trades */}
+              {wfoResult.aggregatedISMetrics.totalTrades === 0 && (
+                <div className="p-4 bg-amber-950/40 border border-amber-800/80 rounded-xl space-y-1 text-xs text-amber-200">
+                  <div className="flex items-center gap-2 font-bold text-amber-300">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span>No Trades Generated</span>
+                  </div>
+                  <p>
+                    The strategy produced zero trades over the evaluation period because the configured entry conditions were not met by any candle. Try selecting complementary indicators or adjusting parameter thresholds.
+                  </p>
+                </div>
+              )}
+
               {/* Side-by-Side In-Sample vs Out-of-Sample Performance */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {/* In-Sample (Training) */}
                 <div className="p-3.5 bg-[#0e1322] border border-slate-800 rounded-xl space-y-2">
                   <div className="flex items-center justify-between text-xs pb-1.5 border-b border-slate-800">
-                    <span className="font-bold text-cyan-300">In-Sample (Training 70%)</span>
+                    <span className="font-bold text-cyan-300">In-Sample (Training 60%)</span>
                     <span className="text-[10px] font-mono text-slate-400">{wfoResult.aggregatedISMetrics.totalTrades} trades</span>
                   </div>
                   <div className="space-y-1 font-mono text-xs">
@@ -588,7 +601,7 @@ export const BacktestLab: React.FC<BacktestLabProps> = ({ onApplyStrategyToTermi
                 {/* Out-of-Sample (Validation) */}
                 <div className="p-3.5 bg-[#0e1322] border border-slate-800 rounded-xl space-y-2">
                   <div className="flex items-center justify-between text-xs pb-1.5 border-b border-slate-800">
-                    <span className="font-bold text-indigo-300">Out-of-Sample (Validation 30%)</span>
+                    <span className="font-bold text-indigo-300">Out-of-Sample (Validation 40%)</span>
                     <span className="text-[10px] font-mono text-slate-400">{wfoResult.aggregatedOOSMetrics.totalTrades} trades</span>
                   </div>
                   <div className="space-y-1 font-mono text-xs">

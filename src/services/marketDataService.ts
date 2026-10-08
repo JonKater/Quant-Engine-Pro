@@ -265,6 +265,9 @@ export class MarketDataService {
       if (this.isSimulationPaused) return;
       this.stepNextTick();
     }, 600); // 600ms tick updates for responsive demo simulation
+    if (this.timer && typeof (this.timer as any).unref === 'function') {
+      (this.timer as any).unref();
+    }
   }
 
   public stepNextTick(): void {
