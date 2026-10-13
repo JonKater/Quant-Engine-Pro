@@ -26,6 +26,7 @@ import {
   isIndicatorAllowed,
 } from './indicators';
 import { ASSET_SPECS } from './marketDataService';
+import { createSeededRandom, hashStringToSeed } from '../utils/seededRandom';
 
 export interface OptimizationParamBounds {
   emaFast: { min: number; max: number; step: number };
@@ -109,19 +110,20 @@ export class OptunaWalkForwardEngine {
     history: OptunaTrial[],
     bounds: OptimizationParamBounds,
     baseConfig: StrategyConfig,
-    trialIndex: number
+    trialIndex: number,
+    prng: () => number = Math.random
   ): Partial<StrategyConfig> {
     // For the initial 4 exploration trials, use quasi-random Latin Hypercube / uniform exploration
     if (history.length < 4) {
       return {
-        emaFastPeriod: this.randomStep(bounds.emaFast.min, bounds.emaFast.max, bounds.emaFast.step),
-        emaSlowPeriod: this.randomStep(bounds.emaSlow.min, bounds.emaSlow.max, bounds.emaSlow.step),
-        rsiPeriod: this.randomStep(bounds.rsiPeriod.min, bounds.rsiPeriod.max, bounds.rsiPeriod.step),
-        rsiOversold: this.randomStep(bounds.rsiOversold.min, bounds.rsiOversold.max, bounds.rsiOversold.step),
-        rsiOverbought: this.randomStep(bounds.rsiOverbought.min, bounds.rsiOverbought.max, bounds.rsiOverbought.step),
-        stopLossValue: this.randomStep(bounds.stopLossValue.min, bounds.stopLossValue.max, bounds.stopLossValue.step),
-        riskRewardRatio: this.randomStep(bounds.riskRewardRatio.min, bounds.riskRewardRatio.max, bounds.riskRewardRatio.step),
-        srLookback: this.randomStep(bounds.srLookback.min, bounds.srLookback.max, bounds.srLookback.step),
+        emaFastPeriod: this.randomStep(bounds.emaFast.min, bounds.emaFast.max, bounds.emaFast.step, prng),
+        emaSlowPeriod: this.randomStep(bounds.emaSlow.min, bounds.emaSlow.max, bounds.emaSlow.step, prng),
+        rsiPeriod: this.randomStep(bounds.rsiPeriod.min, bounds.rsiPeriod.max, bounds.rsiPeriod.step, prng),
+        rsiOversold: this.randomStep(bounds.rsiOversold.min, bounds.rsiOversold.max, bounds.rsiOversold.step, prng),
+        rsiOverbought: this.randomStep(bounds.rsiOverbought.min, bounds.rsiOverbought.max, bounds.rsiOverbought.step, prng),
+        stopLossValue: this.randomStep(bounds.stopLossValue.min, bounds.stopLossValue.max, bounds.stopLossValue.step, prng),
+        riskRewardRatio: this.randomStep(bounds.riskRewardRatio.min, bounds.riskRewardRatio.max, bounds.riskRewardRatio.step, prng),
+        srLookback: this.randomStep(bounds.srLookback.min, bounds.srLookback.max, bounds.srLookback.step, prng),
       };
     }
 
@@ -131,74 +133,83 @@ export class OptunaWalkForwardEngine {
     const topTrials = sorted.slice(0, topCount);
 
     // Sample around top performing parameters with Gaussian kernel perturbation
-    const parent = topTrials[Math.floor(Math.random() * topTrials.length)].params;
+    const parentIndex = Math.floor(prng() * topTrials.length);
+    const parent = topTrials[parentIndex].params;
 
     return {
       emaFastPeriod: this.perturbParam(
         parent.emaFastPeriod ?? baseConfig.emaFastPeriod,
         bounds.emaFast.min,
         bounds.emaFast.max,
-        bounds.emaFast.step
+        bounds.emaFast.step,
+        prng
       ),
       emaSlowPeriod: this.perturbParam(
         parent.emaSlowPeriod ?? baseConfig.emaSlowPeriod,
         bounds.emaSlow.min,
         bounds.emaSlow.max,
-        bounds.emaSlow.step
+        bounds.emaSlow.step,
+        prng
       ),
       rsiPeriod: this.perturbParam(
         parent.rsiPeriod ?? baseConfig.rsiPeriod,
         bounds.rsiPeriod.min,
         bounds.rsiPeriod.max,
-        bounds.rsiPeriod.step
+        bounds.rsiPeriod.step,
+        prng
       ),
       rsiOversold: this.perturbParam(
         parent.rsiOversold ?? baseConfig.rsiOversold,
         bounds.rsiOversold.min,
         bounds.rsiOversold.max,
-        bounds.rsiOversold.step
+        bounds.rsiOversold.step,
+        prng
       ),
       rsiOverbought: this.perturbParam(
         parent.rsiOverbought ?? baseConfig.rsiOverbought,
         bounds.rsiOverbought.min,
         bounds.rsiOverbought.max,
-        bounds.rsiOverbought.step
+        bounds.rsiOverbought.step,
+        prng
       ),
       stopLossValue: this.perturbParam(
         parent.stopLossValue ?? baseConfig.stopLossValue,
         bounds.stopLossValue.min,
         bounds.stopLossValue.max,
-        bounds.stopLossValue.step
+        bounds.stopLossValue.step,
+        prng
       ),
       riskRewardRatio: this.perturbParam(
         parent.riskRewardRatio ?? baseConfig.riskRewardRatio,
         bounds.riskRewardRatio.min,
         bounds.riskRewardRatio.max,
-        bounds.riskRewardRatio.step
+        bounds.riskRewardRatio.step,
+        prng
       ),
       srLookback: this.perturbParam(
         parent.srLookback ?? baseConfig.srLookback,
         bounds.srLookback.min,
         bounds.srLookback.max,
-        bounds.srLookback.step
+        bounds.srLookback.step,
+        prng
       ),
     };
   }
 
-  private static randomStep(min: number, max: number, step: number): number {
+  private static randomStep(min: number, max: number, step: number, prng: () => number = Math.random): number {
     const steps = Math.round((max - min) / step);
-    const chosenStep = Math.floor(Math.random() * (steps + 1));
+    const chosenStep = Math.floor(prng() * (steps + 1));
     return Number((min + chosenStep * step).toFixed(2));
   }
 
-  private static perturbParam(val: number, min: number, max: number, step: number): number {
+  private static perturbParam(val: number, min: number, max: number, step: number, prng: () => number = Math.random): number {
     // 70% chance to mutate slightly, 30% chance of exploratory jump
-    if (Math.random() < 0.7) {
-      const deltaSteps = (Math.random() > 0.5 ? 1 : -1) * (Math.random() > 0.6 ? 2 : 1);
+    if (prng() < 0.7) {
+      const deltaSteps = (prng() > 0.5 ? 1 : -1) * (prng() > 0.6 ? 2 : 1);
       const nextVal = val + deltaSteps * step;
       return Number(Math.max(min, Math.min(max, nextVal)).toFixed(2));
     }
-    return this.randomStep(min, max, step);
+    return this.randomStep(min, max, step, prng);
   }
 
   /**
@@ -542,6 +553,12 @@ export class OptunaWalkForwardEngine {
     const totalExpectedTrials = windows.length * trialsPerFold;
     const trials: OptunaTrial[] = [];
 
+    // Seeded PRNG ensures that identical search runs yield identical sampled parameters & metrics
+    const seed = hashStringToSeed(
+      `${baseStrategy.name}:${baseStrategy.symbol}:${baseStrategy.timeframe}:${numFolds}:${trialsPerFold}`
+    );
+    const prng = createSeededRandom(seed);
+
     let overallCompleted = 0;
 
     for (const window of windows) {
@@ -555,7 +572,8 @@ export class OptunaWalkForwardEngine {
           foldTrialHistory,
           DEFAULT_SEARCH_SPACE,
           baseStrategy,
-          t
+          t,
+          prng
         );
         const trialStrategy: StrategyConfig = { ...baseStrategy, ...sampledParams };
 

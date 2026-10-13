@@ -5,6 +5,7 @@
  */
 
 import { AssetSpecification, Candle, MarketTick } from '../types/trading';
+import { createSeededRandom, hashStringToSeed } from '../utils/seededRandom';
 
 export const ASSET_SPECS: Record<string, AssetSpecification> = {
   'EUR/USD': {
@@ -200,9 +201,10 @@ export class MarketDataService {
   public generateHistoricalCandlesForSymbol(
     symbol: string,
     count: number = 400,
-    timeframe: 'M5' | 'M15' | 'H1' | 'H4' | 'D1' = 'H1'
+    timeframe: 'M5' | 'M15' | 'H1' | 'H4' | 'D1' = 'H1',
+    customSeed?: number
   ): Candle[] {
-    const spec = ASSET_SPECS[symbol];
+    const spec = ASSET_SPECS[symbol] || ASSET_SPECS['EUR/USD'];
     const basePrice = REFERENCE_PRICES[symbol] || 100;
     const tfMinutes = {
       M5: 5,
@@ -213,32 +215,37 @@ export class MarketDataService {
     }[timeframe];
 
     const intervalMs = tfMinutes * 60 * 1000;
-    const now = Date.now();
+    // Deterministic anchor timestamp ensures identical timestamps across runs
+    const anchorTimestamp = 1775000000000;
     const candles: Candle[] = [];
+
+    // Seeded PRNG ensures identical prices and volume across runs with same settings
+    const seed = customSeed ?? hashStringToSeed(`${symbol}:${timeframe}:${count}`);
+    const prng = createSeededRandom(seed);
 
     // Realistic volatility and trend drift based on asset class
     const dailyVol = spec.assetClass === 'commodity' ? 0.015 : spec.assetClass === 'index' ? 0.012 : 0.007;
-    const candleVol = (dailyVol * Math.sqrt(tfMinutes / 1440));
+    const candleVol = dailyVol * Math.sqrt(tfMinutes / 1440);
 
     // Seeded random walk with mean reversion and momentum waves
     let currentClose = basePrice * 0.94; // start slightly earlier to create realistic trend
     let trendPhase = 0;
 
     for (let i = count - 1; i >= 0; i--) {
-      const timestamp = now - i * intervalMs;
+      const timestamp = anchorTimestamp - i * intervalMs;
       trendPhase += 0.05;
       const cyclicalDrift = Math.sin(trendPhase) * (candleVol * 0.35);
-      const randomShock = (Math.random() - 0.495) * 2 * candleVol;
+      const randomShock = (prng() - 0.495) * 2 * candleVol;
       const changePct = cyclicalDrift + randomShock;
 
       const open = currentClose;
       const close = Number((open * (1 + changePct)).toFixed(spec.digits));
-      const wickHigh = Math.max(open, close) * (1 + Math.random() * candleVol * 0.9);
-      const wickLow = Math.min(open, close) * (1 - Math.random() * candleVol * 0.9);
+      const wickHigh = Math.max(open, close) * (1 + prng() * candleVol * 0.9);
+      const wickLow = Math.min(open, close) * (1 - prng() * candleVol * 0.9);
 
       const high = Number(wickHigh.toFixed(spec.digits));
       const low = Number(wickLow.toFixed(spec.digits));
-      const volume = Math.floor(1000 + Math.random() * 8000 + Math.abs(changePct) * 100000);
+      const volume = Math.floor(1000 + prng() * 8000 + Math.abs(changePct) * 100000);
 
       candles.push({
         timestamp,
