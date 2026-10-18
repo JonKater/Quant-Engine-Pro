@@ -1,146 +1,111 @@
 /**
- * Architecture & Technical Implementation Plan Specifications
- * Senior Quantitative Architect blueprint for Web, Android, and iOS.
+ * Simulation Methodology & Mechanics Documentation
+ *
+ * Explanatory guide detailing how the application computes its numbers,
+ * how prices and spreads are simulated, how account arithmetic and margin work,
+ * how walk-forward verification is structured, and where the limits of the simulation lie.
  */
 
-export interface ArchitectureModule {
+export interface MethodologySection {
   id: string;
-  name: string;
-  tier: 'Data Ingestion' | 'Execution Core' | 'Analytics & Optuna' | 'Client Layer' | 'Infrastructure';
-  techStack: string[];
-  throughputSLA: string;
-  latencySLA: string;
-  description: string;
-  responsibilities: string[];
+  title: string;
+  category: 'Price Modeling' | 'Execution & Spread' | 'Account & Margin' | 'Walk-Forward Lab' | 'Simulation Limits';
+  summary: string;
+  details: string[];
+  formulaOrRule?: string;
 }
 
-export const SYSTEM_MODULES: ArchitectureModule[] = [
+export const METHODOLOGY_SECTIONS: MethodologySection[] = [
   {
-    id: 'market-data-gateway',
-    name: 'Market Data Ingestion & Tick Normalizer',
-    tier: 'Data Ingestion',
-    techStack: ['Go / C++', 'gRPC', 'Apache Kafka', 'FIX 4.4', 'FlatBuffers'],
-    throughputSLA: '250,000 ticks/sec',
-    latencySLA: '< 250 microseconds',
-    description:
-      'Aggregates multi-broker L1/L2 pricing feeds (GKFX, LMAX, FXCM, Currenex), normalizes currency pairs, and broadcasts to internal ring buffers.',
-    responsibilities: [
-      'Multi-feed FIX 4.4 connection pooling & heartbeat monitoring',
-      'Dynamic bid/ask spread modeling and liquidity session adjustments',
-      'Tick deduplication, outlier rejection, and synthetic cross-rate calculation',
-      'High-throughput publishing to Kafka/Aeron low-latency message bus',
+    id: 'price-generation',
+    title: 'Price Series & Volatility Generation',
+    category: 'Price Modeling',
+    summary:
+      'Prices are generated entirely in the browser using a seeded geometric random walk with cyclical momentum drift, mean reversion, and asset-specific volatility parameters.',
+    formulaOrRule:
+      'P(t) = P(t-1) * (1 + sin(omega * t) * (0.35 * sigma) + shock * sigma)',
+    details: [
+      'Deterministic Mulberry32 PRNG with 32-bit FNV-1a hashing guarantees identical candle sequences for identical symbol/timeframe/bar settings.',
+      'Asset-specific daily volatility parameters: Forex (0.7% daily vol), Gold (1.5% daily vol), Equity Indices (1.2% daily vol).',
+      'Cyclical wave component simulates institutional multi-day trending phases and consolidation regimes.',
+      'Candles close deterministically at the end of their period (M5, M15, H1, H4, D1) and a new one begins without growing indefinitely.',
     ],
   },
   {
-    id: 'broker-matching-engine',
-    name: 'Broker Simulation & Ledger Matching Engine',
-    tier: 'Execution Core',
-    techStack: ['Rust / C++', 'In-Memory State Machine', 'Redis Sentinel', 'PostgreSQL'],
-    throughputSLA: '50,000 orders/sec',
-    latencySLA: '< 1.2 milliseconds',
-    description:
-      'Simulates institutional broker environment (mirroring GKFX ECN demo behavior) with instant execution, pending order triggers, margin evaluation, and automated liquidation.',
-    responsibilities: [
-      'Real-time position lifecycle management (Market, Limit, Stop, Trailing Stop)',
-      'Sub-millisecond margin requirement and free margin calculation',
-      'Automated Margin Call warnings (100%) and Stop-Out liquidations (50%)',
-      'Transaction cost modeling: Commission per lot ($3.50/side) and overnight swap rollover',
-      'Realistic volatility-based slippage engine',
+    id: 'dynamic-spread',
+    title: 'Dynamic Spread & Liquidity Sessions',
+    category: 'Execution & Spread',
+    summary:
+      'Replicates institutional interbank liquidity conditions by varying raw buy/sell spreads according to global financial market session hours and real-time volatility spikes.',
+    formulaOrRule:
+      'Spread(t) = BaseSpread * SessionFactor(hour) * VolatilityMultiplier * (0.95 + noise * 0.20)',
+    details: [
+      'London / New York Overlap (12:00 - 16:00 UTC): Maximum market liquidity, lowest spread factor (0.90x base raw spread).',
+      'Asian Session (00:00 - 07:00 UTC): Reduced FX market depth, slightly wider spread factor (1.35x base raw spread).',
+      'Rollover Hour (21:00 - 22:30 UTC): Interbank liquidity drops drastically, widening spreads (2.80x base raw spread).',
+      'Microstructural noise oscillates spread by -5% to +15% per tick update to emulate realistic liquidity fluctuations.',
     ],
   },
   {
-    id: 'optuna-wfo-cluster',
-    name: 'Distributed Walk-Forward Optimization & Optuna Cluster',
-    tier: 'Analytics & Optuna',
-    techStack: ['Python 3.12', 'Optuna (TPE)', 'Ray Core', 'Numba / Polars', 'Redis Queue'],
-    throughputSLA: '1,000 parameter trials/sec',
-    latencySLA: 'Batch / Interactive (1-5s)',
-    description:
-      'Executes Tree-structured Parzen Estimator (TPE) Bayesian hyperparameter search over rolling In-Sample (IS) and Out-of-Sample (OOS) data windows to prevent overfitting.',
-    responsibilities: [
-      'Walk-forward time-series window generation (expanding / rolling folds)',
-      'Hyperparameter search over restricted allowed technical indicators (EMA, RSI, MACD, BB, ATR, S&R)',
-      'Walk-Forward Efficiency (WFE) score calculation to penalize overfitted curve-fits',
-      'Trial pruning using MedianPruner for rapid convergence',
-      'Parameter sensitivity and ANOVA variance decomposition',
+    id: 'account-margin-arithmetic',
+    title: 'Account Currency & Margin Arithmetic',
+    category: 'Account & Margin',
+    summary:
+      'All profit, loss, margin, and fees are expressed strictly in the account base currency (USD) across all instruments, including ones quoted in foreign currencies.',
+    formulaOrRule:
+      'Margin_USD = Notional_USD / Leverage  |  PnL_USD = PnL_Quote / ExchangeRate_to_USD',
+    details: [
+      'For USD/JPY (quoted in Japanese Yen), price gains and losses in Yen are converted to US Dollars by dividing by the current USD/JPY exchange rate.',
+      'USD/JPY margin requirement is exactly $1,000 USD per standard lot ($100,000 base USD / 1:100 leverage), rather than being inflated by JPY exchange rates.',
+      'The account ledger (Balance, Equity, Margin Used, Free Margin, Margin Level %) is reconciled simultaneously and immediately upon every order open, order close, or tick update.',
+      'There is zero interim lag: closing one position while others remain open immediately re-evaluates the remaining positions without resetting floating P&L to zero.',
+      'Realized P&L in the trade history reconciles to the exact cent with the total change in balance (Change in Balance = Net Realized PnL = Gross PnL - Commission + Swap).',
     ],
   },
   {
-    id: 'historical-data-warehouse',
-    name: 'Time-Series Tick & OHLC Warehouse',
-    tier: 'Infrastructure',
-    techStack: ['ClickHouse', 'Apache Arrow / Parquet', 'S3 Object Storage', 'Zstandard'],
-    throughputSLA: '1.2 GB/sec sequential scan',
-    latencySLA: '< 15 milliseconds query latency',
-    description:
-      'Columnar storage engine optimized for financial time-series, storing tick-by-tick and multi-timeframe OHLC candles (M1, M5, M15, H1, H4, D1).',
-    responsibilities: [
-      'Fast vectorized candle aggregation from raw ticks',
-      'Ultra-dense compression (10:1 ratio on tick data with Zstandard)',
-      'Partitioning by symbol and trading date for zero-disk-waste lookups',
+    id: 'order-validation-liquidation',
+    title: 'Order Validation & Forced Liquidation',
+    category: 'Execution & Spread',
+    summary:
+      'Validates all orders before acceptance and enforces strict margin-call and stop-out forced liquidations based on true account equity.',
+    formulaOrRule:
+      'Margin Level % = (Equity / Margin Used) * 100  |  Stop-Out Trigger <= 50%',
+    details: [
+      'Buy Limit orders must be priced strictly below current market Ask price; Buy Stop orders must be priced strictly above.',
+      'Sell Limit orders must be priced strictly above current market Bid price; Sell Stop orders must be priced strictly below.',
+      'No order — including resting pending orders that trigger later — opens a position if insufficient free margin is available.',
+      'Margin Call Warning triggers when Margin Level <= 100%.',
+      'Stop-Out Liquidation triggers when Margin Level <= 50%, systematically liquidating the position with the single largest floating loss first until margin level recovers above 50%.',
     ],
   },
   {
-    id: 'client-api-gateway',
-    name: 'Real-Time WebSocket & API Gateway',
-    tier: 'Client Layer',
-    techStack: ['Node.js / Go', 'WebSockets (ws)', 'gRPC-Web', 'JWT / OAuth2'],
-    throughputSLA: '100,000 concurrent sockets',
-    latencySLA: '< 8 milliseconds round-trip',
-    description:
-      'Provides persistent bidirectional WebSocket channels for streaming quotes, account balance updates, order tickets, and backtest results.',
-    responsibilities: [
-      'Multiplexed symbol quote subscriptions with client-side throttling (up to 30Hz)',
-      'Binary Protobuf/FlatBuffers serialization for 75% bandwidth reduction',
-      'Rate-limiting and DDoS protection per demo trading account',
+    id: 'walk-forward-verification',
+    title: 'Walk-Forward Optimization & Anti-Overfitting',
+    category: 'Walk-Forward Lab',
+    summary:
+      'Employs rolling In-Sample (training) and Out-of-Sample (verification) time folds to evaluate whether discovered parameter sets reflect genuine statistical edges or curve-fitted noise.',
+    formulaOrRule:
+      'WFE % = (Out-of-Sample Return % / In-Sample Return %) * 100  |  Threshold >= 50%',
+    details: [
+      'In-Sample windows span 60% of the dataset, providing >170 active bars after indicator warm-up periods (up to 70 bars) for meaningful parameter tuning.',
+      'Out-of-Sample windows seamlessly tile the remaining 40% all the way to the end of the dataset, ensuring no historical data goes unused.',
+      'Parameter optimization rests EXCLUSIVELY on In-Sample training data. Out-of-sample data is read only afterwards to report how well the selection held up — it never influences the choice.',
+      'Walk-Forward Efficiency (WFE) >= 50% classifies a strategy as robust and generalizable; WFE < 50% flags the parameters as overfitted to historical noise.',
+      'Hyperparameter sensitivity is derived directly from empirical search variance (R^2 variance contribution across completed trials), never from hardcoded constants.',
+    ],
+  },
+  {
+    id: 'simulation-limits',
+    title: 'Deliberate Simplifications & Simulation Limits',
+    category: 'Simulation Limits',
+    summary:
+      'Transparent disclosure of intentional modeling simplifications and simulation boundaries.',
+    details: [
+      'Zero Real Money & Zero Broker Connectivity: All accounts and funds are strictly simulated demo balances.',
+      'Client-Side Browser Execution: All price series generation, order book matching, indicator calculations, and backtests execute locally in JavaScript/TypeScript.',
+      'Discrete Tick Interval: Ticks stream at responsive 600ms intervals rather than microsecond hardware exchange feeds.',
+      'Single Fill Execution: Market orders fill in whole at the current top-of-book bid/ask with simulated volatility slippage rather than partial fills across depth tiers.',
+      'Overnight Financing: Swap financing is modeled linearly per 24-hour cycle rather than complex interbank central bank rate differentials and triple-swap Wednesday adjustments.',
     ],
   },
 ];
-
-export interface MobileArchitectureSpec {
-  framework: string;
-  recommendation: string;
-  advantages: string[];
-  renderingApproach: string;
-  dataSyncStrategy: string;
-  offlineCapabilities: string;
-  pushNotifications: string;
-  sampleCode: string;
-}
-
-export const MOBILE_ARCHITECTURE_SPEC: MobileArchitectureSpec = {
-  framework: 'Kotlin Multiplatform (KMP) + Jetpack Compose (Android) & SwiftUI (iOS)',
-  recommendation:
-    'For high-performance quantitative trading terminals, we architect with Kotlin Multiplatform (KMP) for shared broker ledger math, indicator calculations, and WebSocket state, paired with native Jetpack Compose & SwiftUI for buttery 120Hz chart rendering.',
-  advantages: [
-    'Zero-overhead native performance on iOS (Metal) and Android (Vulkan)',
-    '100% shared mathematical models (P&L calculations, margin requirements, TPE optimizer bindings)',
-    'Direct access to low-level OS networking APIs (NWConnection on iOS, OkHttp/Ktor on Android)',
-    'Seamless background push notification handling with zero memory leak risk',
-  ],
-  renderingApproach:
-    'Custom high-performance canvas rendering pipeline capable of streaming 60-120 fps candlestick charts with interactive pinch-to-zoom, pan, and real-time bid/ask order book overlays.',
-  dataSyncStrategy:
-    'Bidirectional WebSocket channel using binary Protocol Buffers. When app transitions to background, tick stream throttles to 1Hz or disconnects with instant catch-up sync on resume.',
-  offlineCapabilities:
-    'Local SQLite / Room (Android) & SwiftData (iOS) storage holding 10,000 candles per symbol. Users can configure and dry-run backtests offline.',
-  pushNotifications:
-    'Firebase Cloud Messaging (FCM) & Apple Push Notification service (APNs) triggered by the Risk Engine: Margin Call warnings (<100%), Stop-Out liquidations (<50%), and SL/TP triggers.',
-  sampleCode: `// Shared KMP Engine: Dynamic Broker Ledger Calculator
-class BrokerLedgerCalculator(val leverage: Double) {
-    fun calculateFloatingPnL(
-        side: OrderSide,
-        openPrice: Double,
-        currentPrice: Double,
-        lots: Double,
-        contractSize: Double
-    ): Double {
-        val diff = if (side == OrderSide.BUY) currentPrice - openPrice else openPrice - currentPrice
-        return diff * lots * contractSize
-    }
-
-    fun calculateMarginLevel(equity: Double, marginUsed: Double): Double {
-        return if (marginUsed > 0.0) (equity / marginUsed) * 100.0 else 0.0
-    }
-}`,
-};

@@ -155,7 +155,7 @@ export class MarketDataService {
 
   /**
    * Dynamic Spread Modeling:
-   * Replicates real interbank institutional conditions (like GKFX / LMAX).
+   * Replicates institutional ECN conditions.
    * Spread depends on:
    * - Base raw spread
    * - Market session liquidity (London/NY overlap vs Asian session vs rollover widening)
@@ -188,13 +188,18 @@ export class MarketDataService {
     return Math.max(spec.baseSpreadPips * 0.8, dynamicSpread);
   }
 
+  private timeframeCandles: Map<string, Candle[]> = new Map();
+
   /**
-   * Generates 300+ historical OHLC candles for walk-forward backtesting
+   * Generates historical OHLC candles across timeframes for charting and backtesting
    */
   private generateAllHistoricalCandles(): void {
-    for (const [symbol, spec] of Object.entries(ASSET_SPECS)) {
-      const candles = this.generateHistoricalCandlesForSymbol(symbol, 400, 'H1');
-      this.historicalCandles.set(symbol, candles);
+    const timeframes: ('M5' | 'M15' | 'H1' | 'H4' | 'D1')[] = ['M5', 'M15', 'H1', 'H4', 'D1'];
+    for (const symbol of Object.keys(ASSET_SPECS)) {
+      for (const tf of timeframes) {
+        const candles = this.generateHistoricalCandlesForSymbol(symbol, 400, tf);
+        this.timeframeCandles.set(`${symbol}:${tf}`, candles);
+      }
     }
   }
 
@@ -202,7 +207,8 @@ export class MarketDataService {
     symbol: string,
     count: number = 400,
     timeframe: 'M5' | 'M15' | 'H1' | 'H4' | 'D1' = 'H1',
-    customSeed?: number
+    customSeed?: number,
+    customAnchorTimestamp?: number
   ): Candle[] {
     const spec = ASSET_SPECS[symbol] || ASSET_SPECS['EUR/USD'];
     const basePrice = REFERENCE_PRICES[symbol] || 100;
@@ -215,8 +221,8 @@ export class MarketDataService {
     }[timeframe];
 
     const intervalMs = tfMinutes * 60 * 1000;
-    // Deterministic anchor timestamp ensures identical timestamps across runs
-    const anchorTimestamp = 1775000000000;
+    // Real-time period alignment for live chart, or deterministic fixed anchor for backtesting
+    const anchorTimestamp = customAnchorTimestamp ?? (Math.floor(Date.now() / intervalMs) * intervalMs);
     const candles: Candle[] = [];
 
     // Seeded PRNG ensures identical prices and volume across runs with same settings
@@ -322,14 +328,34 @@ export class MarketDataService {
         volume: prevTick.volume + Math.floor(1 + Math.random() * 5),
       });
 
-      // Also update latest candle
-      const symbolCandles = this.historicalCandles.get(symbol);
-      if (symbolCandles && symbolCandles.length > 0) {
-        const lastCandle = symbolCandles[symbolCandles.length - 1];
-        lastCandle.close = bid;
-        if (bid > lastCandle.high) lastCandle.high = bid;
-        if (bid < lastCandle.low) lastCandle.low = bid;
-        lastCandle.volume += 1;
+      // Update candles across all active timeframes for this symbol
+      // "Candles close at the end of their period and a new one begins — the last candle does not grow indefinitely."
+      const timeframes: ('M5' | 'M15' | 'H1' | 'H4' | 'D1')[] = ['M5', 'M15', 'H1', 'H4', 'D1'];
+      const tfMinutesMap = { M5: 5, M15: 15, H1: 60, H4: 240, D1: 1440 };
+
+      for (const tf of timeframes) {
+        const tfMs = tfMinutesMap[tf] * 60 * 1000;
+        const candles = this.timeframeCandles.get(`${symbol}:${tf}`);
+        if (!candles || candles.length === 0) continue;
+
+        const lastCandle = candles[candles.length - 1];
+        if (now >= lastCandle.timestamp + tfMs) {
+          // Timeframe period elapsed: close candle and start a new period candle
+          candles.push({
+            timestamp: lastCandle.timestamp + tfMs,
+            open: lastCandle.close,
+            high: Math.max(lastCandle.close, bid),
+            low: Math.min(lastCandle.close, bid),
+            close: bid,
+            volume: 1,
+          });
+          if (candles.length > 500) candles.shift();
+        } else {
+          lastCandle.close = bid;
+          if (bid > lastCandle.high) lastCandle.high = bid;
+          if (bid < lastCandle.low) lastCandle.low = bid;
+          lastCandle.volume += 1;
+        }
       }
     }
 
@@ -361,8 +387,16 @@ export class MarketDataService {
     return Array.from(this.currentTicks.values());
   }
 
-  public getCandles(symbol: string): Candle[] {
-    return this.historicalCandles.get(symbol) || [];
+  public getCandles(
+    symbol: string,
+    timeframe: 'M5' | 'M15' | 'H1' | 'H4' | 'D1' = 'H1'
+  ): Candle[] {
+    const key = `${symbol}:${timeframe}`;
+    if (!this.timeframeCandles.has(key)) {
+      const candles = this.generateHistoricalCandlesForSymbol(symbol, 400, timeframe);
+      this.timeframeCandles.set(key, candles);
+    }
+    return [...(this.timeframeCandles.get(key) || [])];
   }
 
   public subscribe(listener: (ticks: Map<string, MarketTick>) => void): () => void {

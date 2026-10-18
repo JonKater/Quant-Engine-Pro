@@ -1,6 +1,6 @@
 /**
  * Positions, Pending Orders, and Trade History Ledger Table
- * Mirrors institutional MT4 / GKFX Terminal interface with real-time P&L,
+ * Real-time institutional terminal positions and history ledger with net P&L,
  * SL/TP modification dialogs, trailing stop status, and CSV export.
  */
 

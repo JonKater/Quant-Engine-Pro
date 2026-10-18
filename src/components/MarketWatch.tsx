@@ -1,5 +1,5 @@
 /**
- * Market Watch Component (GKFX ECN Quote Board)
+ * Market Watch Component (QuantEngine ECN Quote Board)
  * Real-time streaming Bid / Ask table with dynamic spread monitoring,
  * flash animations on tick updates, and symbol selection.
  */

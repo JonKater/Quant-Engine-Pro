@@ -101,11 +101,13 @@ export const BacktestLab: React.FC<BacktestLabProps> = ({ onApplyStrategyToTermi
     const totalTrials = numFolds * trialsPerFold;
     setProgress({ completed: 0, total: totalTrials });
 
-    // Retrieve historical candles
+    // Retrieve historical candles with deterministic anchor for backtesting
     const candles = marketDataService.generateHistoricalCandlesForSymbol(
       selectedSymbol,
       400,
-      selectedTimeframe
+      selectedTimeframe,
+      undefined,
+      1775000000000
     );
 
     // Run async with progress updates
@@ -679,27 +681,29 @@ export const BacktestLab: React.FC<BacktestLabProps> = ({ onApplyStrategyToTermi
                 </div>
 
                 {/* Parameter Importance */}
-                <div className="pt-2 border-t border-slate-800/80">
-                  <span className="text-[11px] font-semibold text-slate-400 block mb-2">
-                    Hyperparameter Sensitivity & Importance (ANOVA Decomposition):
-                  </span>
-                  <div className="space-y-1.5">
-                    {wfoResult.parameterImportance.map((item) => (
-                      <div key={item.parameter} className="space-y-0.5">
-                        <div className="flex justify-between text-[10px] text-slate-400">
-                          <span>{item.parameter}</span>
-                          <span className="font-mono text-slate-300">{Math.round(item.importance * 100)}%</span>
+                {wfoResult.parameterImportance && wfoResult.parameterImportance.length > 0 && (
+                  <div className="pt-2 border-t border-slate-800/80">
+                    <span className="text-[11px] font-semibold text-slate-400 block mb-2">
+                      Hyperparameter Sensitivity & Importance (Derived from Empirical Trial Variance):
+                    </span>
+                    <div className="space-y-1.5">
+                      {wfoResult.parameterImportance.map((item) => (
+                        <div key={item.parameter} className="space-y-0.5">
+                          <div className="flex justify-between text-[10px] text-slate-400">
+                            <span>{item.parameter}</span>
+                            <span className="font-mono text-slate-300">{Math.round(item.importance * 100)}%</span>
+                          </div>
+                          <div className="w-full h-1 bg-slate-900 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-cyan-400 rounded-full"
+                              style={{ width: `${item.importance * 100}%` }}
+                            />
+                          </div>
                         </div>
-                        <div className="w-full h-1 bg-slate-900 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-cyan-400 rounded-full"
-                            style={{ width: `${item.importance * 100}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             </div>
           ) : (

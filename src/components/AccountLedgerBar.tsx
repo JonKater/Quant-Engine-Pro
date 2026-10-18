@@ -1,5 +1,5 @@
 /**
- * Account Ledger & Margin Health Bar (GKFX-style Demo Account)
+ * Account Ledger & Margin Health Bar (QuantEngine Institutional Demo Account)
  * Displays real-time Balance, Equity, Margin, Free Margin, Margin Level %,
  * Stop-Out / Margin Call alerts, and Broker Stress Testing controls.
  */
@@ -123,9 +123,7 @@ export const AccountLedgerBar: React.FC<AccountLedgerBarProps> = ({
           <button
             id="reset-account-btn"
             onClick={() => {
-              if (window.confirm('Reset demo trading account balance to $50,000?')) {
-                brokerEngine.resetAccount(50000, 100);
-              }
+              brokerEngine.resetAccount(50000, 100);
             }}
             className="flex items-center gap-1 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 text-xs transition-colors"
           >
@@ -138,9 +136,7 @@ export const AccountLedgerBar: React.FC<AccountLedgerBarProps> = ({
             <button
               id="close-all-positions-btn"
               onClick={() => {
-                if (window.confirm(`Close all ${openPositionsCount} open positions immediately?`)) {
-                  brokerEngine.closeAllPositions();
-                }
+                brokerEngine.closeAllPositions();
               }}
               className="px-2 py-1 bg-rose-600/80 hover:bg-rose-600 text-white rounded text-xs font-semibold shadow transition-colors"
             >
@@ -150,8 +146,8 @@ export const AccountLedgerBar: React.FC<AccountLedgerBarProps> = ({
         </div>
       </div>
 
-      {/* Core GKFX Ledger Stats Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+      {/* Account Ledger Stats Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
         {/* Balance */}
         <div className="flex flex-col bg-slate-900/60 p-2 rounded-lg border border-slate-800">
           <span className="text-[10px] uppercase font-medium tracking-wider text-slate-400">Balance</span>
@@ -200,6 +196,19 @@ export const AccountLedgerBar: React.FC<AccountLedgerBarProps> = ({
               : 'text-cyan-400'
           }`}>
             {account.marginLevelPercent > 0 ? `${account.marginLevelPercent}%` : '---'}
+          </span>
+        </div>
+
+        {/* Realized P&L */}
+        <div className={`flex flex-col p-2 rounded-lg border ${
+          account.realizedPnL >= 0
+            ? 'bg-slate-900/60 border-slate-800 text-slate-100'
+            : 'bg-rose-950/20 border-rose-900/40 text-rose-400'
+        }`}>
+          <span className="text-[10px] uppercase font-medium tracking-wider text-slate-400">Realized P&L</span>
+          <span className="font-mono text-base font-bold">
+            {account.realizedPnL >= 0 ? '+' : ''}
+            ${account.realizedPnL.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         </div>
 

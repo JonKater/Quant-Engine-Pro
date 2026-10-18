@@ -75,7 +75,7 @@ export default function App() {
   };
 
   const currentTick = ticks.get(selectedSymbol);
-  const currentCandles = marketDataService.getCandles(selectedSymbol);
+  const currentCandles = marketDataService.getCandles(selectedSymbol, timeframe);
 
   return (
     <div className="min-h-screen bg-[#070a11] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-white">
@@ -89,14 +89,14 @@ export default function App() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-bold text-sm sm:text-base tracking-tight text-white">
-                QuantCore <span className="text-cyan-400 font-mono text-xs font-semibold">v3.4-PRO</span>
+                QuantEngine <span className="text-cyan-400 font-mono text-xs font-semibold">Pro</span>
               </h1>
               <span className="hidden sm:inline-block px-1.5 py-0.2 text-[10px] rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                GKFX ECN Engine
+                Simulated Demo Account
               </span>
             </div>
             <p className="text-[10px] text-slate-400 hidden sm:block">
-              Institutional Broker Simulation & Optuna Walk-Forward Backtester
+              Simulated Multi-Asset Trading Terminal & Walk-Forward Strategy Lab
             </p>
           </div>
         </div>
@@ -113,7 +113,7 @@ export default function App() {
             }`}
           >
             <LineChart className="w-3.5 h-3.5" />
-            <span>Broker Demo Terminal</span>
+            <span>Trading Terminal</span>
           </button>
 
           <button
@@ -126,7 +126,7 @@ export default function App() {
             }`}
           >
             <Cpu className="w-3.5 h-3.5" />
-            <span>Optuna Walk-Forward Lab</span>
+            <span>Strategy & Backtesting Lab</span>
           </button>
 
           <button
@@ -138,19 +138,17 @@ export default function App() {
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Network className="w-3.5 h-3.5" />
-            <span>Architecture & Mobile Spec</span>
+            <Layers className="w-3.5 h-3.5" />
+            <span>Methodology & Mechanics</span>
           </button>
         </div>
 
-        {/* Live System Status Pill */}
+        {/* Real-Time Simulation Status Badge */}
         <div className="hidden lg:flex items-center gap-2 text-xs font-mono text-slate-400">
-          <div className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span className="text-slate-300">Feed: 250k ticks/s</span>
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-slate-300">Simulated ECN Feed</span>
           </div>
-          <span className="text-slate-600">|</span>
-          <span>Lat: 1.2ms</span>
         </div>
       </header>
 
@@ -232,7 +230,7 @@ export default function App() {
         <div className="flex items-center gap-2 font-mono">
           <span>QuantCore Platform</span>
           <span>•</span>
-          <span>GKFX Virtual Demo Account</span>
+          <span>QuantEngine Simulated Demo Account</span>
           <span>•</span>
           <span>Optuna TPE Walk-Forward Engine</span>
         </div>

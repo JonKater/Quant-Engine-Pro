@@ -1,5 +1,5 @@
 /**
- * Broker Order Entry Ticket (GKFX-style Trading Console)
+ * Broker Order Entry Ticket (QuantEngine Trading Console)
  * Handles Instant Market Execution, Limit & Stop Pending Orders,
  * Margin Requirement Estimations, Pip Calculations, and Trailing Stops.
  */
@@ -47,11 +47,11 @@ export const OrderTicket: React.FC<OrderTicketProps> = ({
 
   // Pip value in USD:
   // For 1.00 lot EUR/USD (100k units): 1 pip (0.0001) = $10.00
-  // For XAU/USD (100 oz): 1 pip ($0.01) = $1.00
   const pipValueUSD = useMemo(() => {
     if (!spec) return 10;
-    return Number((lots * spec.contractSize * spec.pipMultiplier).toFixed(2));
-  }, [lots, spec]);
+    const rawPipVal = lots * spec.contractSize * spec.pipMultiplier;
+    return brokerEngine.convertQuoteToUSD(selectedSymbol, rawPipVal, currentTick);
+  }, [lots, spec, selectedSymbol, currentTick]);
 
   // Estimated required margin
   const estMargin = useMemo(() => {

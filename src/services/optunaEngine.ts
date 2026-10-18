@@ -318,7 +318,9 @@ export class OptunaWalkForwardEngine {
             ? worstPrice - activeTrade.openPrice
             : activeTrade.openPrice - worstPrice;
         const comm = spec.commissionPerLot * 2 * activeTrade.lots;
-        const intraPnL = worstDiff * activeTrade.lots * spec.contractSize - comm;
+        const rawWorstQuote = worstDiff * activeTrade.lots * spec.contractSize;
+        const worstUSD = strategy.symbol === 'USD/JPY' ? rawWorstQuote / c.close : rawWorstQuote;
+        const intraPnL = worstUSD - comm;
         const intraEquity = balance + intraPnL;
         const intraDdUSD = peakEquity - intraEquity;
         if (intraDdUSD > maxDrawdownUSD) maxDrawdownUSD = intraDdUSD;
@@ -358,8 +360,10 @@ export class OptunaWalkForwardEngine {
             activeTrade.side === 'BUY'
               ? exitPrice - activeTrade.openPrice
               : activeTrade.openPrice - exitPrice;
+          const rawQuoteDiff = diff * activeTrade.lots * spec.contractSize;
+          const grossUSD = strategy.symbol === 'USD/JPY' ? rawQuoteDiff / exitPrice : rawQuoteDiff;
           const commission = spec.commissionPerLot * 2 * activeTrade.lots;
-          const pnl = diff * activeTrade.lots * spec.contractSize - commission;
+          const pnl = Number((grossUSD - commission).toFixed(2));
 
           balance += pnl;
           equity = balance;
@@ -464,7 +468,8 @@ export class OptunaWalkForwardEngine {
           let lots = strategy.fixedLots;
           if (strategy.positionSizingMode === 'RISK_PERCENT') {
             const riskAmount = balance * (strategy.riskPercentOfEquity / 100);
-            const lossPerLot = slDistance * spec.contractSize;
+            const rawLossPerLot = slDistance * spec.contractSize;
+            const lossPerLot = strategy.symbol === 'USD/JPY' ? rawLossPerLot / entryPrice : rawLossPerLot;
             if (lossPerLot > 0) {
               lots = Number(Math.max(spec.minLot, Math.min(10, riskAmount / lossPerLot)).toFixed(2));
             }
@@ -589,19 +594,20 @@ export class OptunaWalkForwardEngine {
           window.oosEndIndex
         );
 
-        // Walk-Forward Efficiency calculation:
+        // Objective score is computed EXCLUSIVELY from In-Sample metrics.
+        // Out-of-sample data MUST NOT influence the optimization or parameter selection.
+        const isSharpe = Math.max(0, isResult.metrics.sharpeRatio);
+        const isProfitFactor = Math.max(0.1, Math.min(5.0, isResult.metrics.profitFactor));
+        const tradeConsistency = isResult.metrics.totalTrades >= 3 ? 1.0 : isResult.metrics.totalTrades / 3;
+        const returnBonus = isResult.metrics.returnPercent > 0 ? 0.2 : 0;
+        const objectiveScore = Number((isSharpe * isProfitFactor * tradeConsistency + returnBonus).toFixed(3));
+
+        // Walk-Forward Efficiency (WFE) is evaluated strictly afterwards to measure robustness on unseen data:
         // WFE = (OOS Return % / IS Return %)
-        // Handle cases where IS return is near zero or negative
         const isReturn = Math.max(0.1, Math.abs(isResult.metrics.returnPercent));
         const oosReturn = oosResult.metrics.returnPercent;
         const rawWFE = (oosReturn / isReturn) * 100;
         const walkForwardEfficiency = Number(Math.max(0, Math.min(200, rawWFE)).toFixed(1));
-
-        // Objective score combines OOS Sharpe, Profit Factor, and WFE stability penalty
-        const wfePenalty = walkForwardEfficiency < 50 ? walkForwardEfficiency / 50 : 1.0;
-        const objectiveScore = Number(
-          (Math.max(0, oosResult.metrics.sharpeRatio * oosResult.metrics.profitFactor) * wfePenalty).toFixed(3)
-        );
 
         const trial: OptunaTrial = {
           trialNumber: ++overallCompleted,
@@ -623,7 +629,8 @@ export class OptunaWalkForwardEngine {
       }
     }
 
-    // Select the best overall robust parameter set from highest scoring trials
+    // Select best parameters EXCLUSIVELY using in-sample results.
+    // Out-of-sample results are read only afterwards to report how well the choice held up.
     const bestTrial = [...trials].sort((a, b) => b.objectiveScore - a.objectiveScore)[0] || trials[0];
     const bestParams = bestTrial ? bestTrial.params : {};
     const finalStrategy: StrategyConfig = { ...baseStrategy, ...bestParams };
@@ -640,14 +647,8 @@ export class OptunaWalkForwardEngine {
     const overallWFE = Number(Math.max(0, (oosRet / isRet) * 100).toFixed(1));
     const isOverfitted = overallWFE < 50;
 
-    // Parameter sensitivity / importance analysis
-    const paramImportance = [
-      { parameter: 'RSI Period & Thresholds', importance: 0.32 },
-      { parameter: 'Stop Loss ATR Multiplier', importance: 0.26 },
-      { parameter: 'Risk-to-Reward Ratio', importance: 0.21 },
-      { parameter: 'EMA Trend Alignment', importance: 0.14 },
-      { parameter: 'Support & Resistance Lookback', importance: 0.07 },
-    ];
+    // Derived hyperparameter sensitivity calculated directly from actual trial search results
+    const paramImportance = this.calculateParameterSensitivity(trials);
 
     return {
       strategyName: baseStrategy.name,
@@ -665,5 +666,73 @@ export class OptunaWalkForwardEngine {
       parameterImportance: paramImportance,
       executionTimeMs: Date.now() - startTime,
     };
+  }
+
+  /**
+   * Derives actual hyperparameter sensitivity ($R^2$ variance contribution)
+   * from the empirical trial search history.
+   * "Never show a number you have not actually computed."
+   */
+  public static calculateParameterSensitivity(
+    trials: OptunaTrial[]
+  ): { parameter: string; importance: number }[] {
+    if (trials.length < 4) return [];
+
+    const paramLabels: Record<string, string> = {
+      emaFastPeriod: 'Fast EMA Period',
+      emaSlowPeriod: 'Slow EMA Period',
+      rsiPeriod: 'RSI Period',
+      rsiOversold: 'RSI Oversold Level',
+      rsiOverbought: 'RSI Overbought Level',
+      stopLossValue: 'Stop Loss ATR Multiplier',
+      riskRewardRatio: 'Risk-to-Reward Ratio',
+      srLookback: 'S&R Pivot Lookback',
+    };
+
+    const scores = trials.map((t) => t.objectiveScore);
+    const meanScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const scoreVar = scores.reduce((a, b) => a + Math.pow(b - meanScore, 2), 0);
+
+    if (scoreVar === 0) return [];
+
+    const correlations: { parameter: string; rawImportance: number }[] = [];
+
+    for (const [key, label] of Object.entries(paramLabels)) {
+      const values = trials.map((t) => (t.params as any)[key]).filter((v) => typeof v === 'number');
+      if (values.length < trials.length) continue;
+
+      const meanVal = values.reduce((a, b) => a + b, 0) / values.length;
+      let cov = 0;
+      let valVar = 0;
+      for (let i = 0; i < trials.length; i++) {
+        const valDiff = values[i] - meanVal;
+        const scoreDiff = scores[i] - meanScore;
+        cov += valDiff * scoreDiff;
+        valVar += valDiff * valDiff;
+      }
+
+      if (valVar > 0) {
+        // Pearson correlation squared (R^2 variance contribution)
+        const r = cov / Math.sqrt(valVar * scoreVar);
+        const r2 = Math.min(1, Math.max(0, r * r));
+        correlations.push({ parameter: label, rawImportance: r2 });
+      }
+    }
+
+    const totalRaw = correlations.reduce((sum, item) => sum + item.rawImportance, 0);
+    if (totalRaw === 0) {
+      return correlations.map((c) => ({
+        parameter: c.parameter,
+        importance: Number((1 / correlations.length).toFixed(2)),
+      }));
+    }
+
+    return correlations
+      .map((c) => ({
+        parameter: c.parameter,
+        importance: Number((c.rawImportance / totalRaw).toFixed(2)),
+      }))
+      .filter((c) => c.importance > 0)
+      .sort((a, b) => b.importance - a.importance);
   }
 }
